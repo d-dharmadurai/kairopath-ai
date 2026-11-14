@@ -57,8 +57,18 @@ export interface RoadmapModule {
   miniProject: MiniProject;
   completed: boolean;
   quizScore?: number;
+  portfolioVerified?: boolean;
+  portfolioScore?: number;
   isRefresher?: boolean;
   refresherForModuleId?: string;
+}
+
+export interface ProjectReviewResult {
+  scorePercent: number;
+  verified: boolean;
+  summary: string;
+  strengths: string[];
+  improvementTip: string;
 }
 
 export interface QuizQuestion {
@@ -103,3 +113,18 @@ export interface MentorEvaluationResult {
     miniProject: MiniProject;
   };
 }
+
+export interface MentorChatMessage {
+  id: string;
+  role: 'user' | 'mentor';
+  content: string;
+  timestamp: string;
+  roadmapUpdated?: boolean;
+}
+
+export interface MentorChatResponse {
+  reply: string;
+  shouldUpdateRoadmap: boolean;
+  updatedModules?: RoadmapModule[];
+}
+

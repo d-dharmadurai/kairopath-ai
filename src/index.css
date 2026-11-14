@@ -12,6 +12,7 @@
     font-family: var(--font-sans);
     scroll-behavior: smooth;
     color-scheme: dark;
+    background-color: #020617;
   }
 
   h1, h2, h3, h4, .font-display {
@@ -23,21 +24,253 @@
   }
 }
 
-/* Custom sleek dark scrollbar */
+/* Stark HUD canvas base */
+.hud-canvas-bg {
+  background-color: #020617;
+  background-image:
+    radial-gradient(ellipse 85% 48% at 50% -8%, rgba(0, 229, 255, 0.16), transparent 68%),
+    radial-gradient(ellipse 60% 40% at 85% 18%, rgba(56, 189, 248, 0.12), transparent 65%),
+    radial-gradient(ellipse 75% 38% at 50% 105%, rgba(0, 229, 255, 0.12), transparent 65%);
+}
+
+/* Translucent Frosted Glass Stark HUD Panels */
+.studio-panel {
+  background: rgba(2, 6, 23, 0.55);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(34, 211, 238, 0.3);
+  box-shadow:
+    inset 0 1px 0 0 rgba(0, 229, 255, 0.12),
+    0 14px 36px -14px rgba(0, 0, 0, 0.85);
+}
+
+.studio-panel-amber {
+  background: rgba(2, 6, 23, 0.62);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(0, 229, 255, 0.45);
+  box-shadow:
+    inset 0 1px 0 0 rgba(0, 229, 255, 0.2),
+    0 0 30px -8px rgba(0, 229, 255, 0.32),
+    0 14px 36px -14px rgba(0, 0, 0, 0.9);
+}
+
+/* Pipeline beam & HUD animations */
+@keyframes pipelineBeam {
+  0% {
+    transform: translateX(-100%);
+    opacity: 0;
+  }
+  20% {
+    opacity: 1;
+  }
+  80% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(220%);
+    opacity: 0;
+  }
+}
+
+@keyframes hudRotateCW {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes hudRotateCCW {
+  from {
+    transform: rotate(360deg);
+  }
+  to {
+    transform: rotate(0deg);
+  }
+}
+
+@keyframes hudParticleFloat {
+  0%, 100% {
+    transform: translate3d(0, 0, 0);
+    opacity: 0.35;
+  }
+  50% {
+    transform: translate3d(18px, -28px, 0);
+    opacity: 0.9;
+  }
+}
+
+@keyframes hudBootIn {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 14px, 0) scale(0.985);
+    filter: brightness(1.3);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+    filter: brightness(1);
+  }
+}
+
+@keyframes hudScanSweep {
+  0% {
+    transform: translate3d(0, -10%, 0);
+    opacity: 0;
+  }
+  15% {
+    opacity: 0.85;
+  }
+  85% {
+    opacity: 0.4;
+  }
+  100% {
+    transform: translate3d(0, 110%, 0);
+    opacity: 0;
+  }
+}
+
+.animate-pipeline-beam {
+  animation: pipelineBeam 1.5s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+.hud-spin-cw {
+  transform-origin: center;
+  animation: hudRotateCW 48s linear infinite;
+}
+
+.hud-spin-ccw {
+  transform-origin: center;
+  animation: hudRotateCCW 34s linear infinite;
+}
+
+.hud-particle {
+  animation: hudParticleFloat 8s ease-in-out infinite;
+}
+
+.hud-boot-in {
+  animation: hudBootIn 0.42s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.hud-stagger-1 {
+  animation: hudBootIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) 40ms both;
+}
+
+.hud-stagger-2 {
+  animation: hudBootIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) 110ms both;
+}
+
+.hud-stagger-3 {
+  animation: hudBootIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) 180ms both;
+}
+
+.hud-stagger-4 {
+  animation: hudBootIn 0.42s cubic-bezier(0.16, 1, 0.3, 1) 240ms both;
+}
+
+.hud-scan-sweep {
+  animation: hudScanSweep 0.85s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes hudBriefingOut {
+  0% {
+    opacity: 1;
+    transform: scale(1);
+    filter: brightness(1);
+  }
+  45% {
+    opacity: 0.9;
+    transform: scale(1.02);
+    filter: brightness(1.35);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.045);
+    filter: brightness(1.6);
+  }
+}
+
+@keyframes hudWorkspaceBoot {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 18px, 0) scale(0.985);
+    filter: brightness(1.35);
+  }
+  50% {
+    opacity: 0.92;
+    filter: brightness(1.12);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+    filter: brightness(1);
+  }
+}
+
+@keyframes hudBootBeam {
+  0% {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+  20% {
+    opacity: 0.95;
+  }
+  80% {
+    opacity: 0.75;
+  }
+  100% {
+    transform: translateY(100vh);
+    opacity: 0;
+  }
+}
+
+.hud-briefing-exit {
+  animation: hudBriefingOut 0.7s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.hud-workspace-boot {
+  animation: hudWorkspaceBoot 0.7s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.hud-boot-beam {
+  animation: hudBootBeam 0.7s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-pipeline-beam,
+  .hud-spin-cw,
+  .hud-spin-ccw,
+  .hud-particle,
+  .hud-boot-in,
+  .hud-stagger-1,
+  .hud-stagger-2,
+  .hud-stagger-3,
+  .hud-stagger-4,
+  .hud-scan-sweep,
+  .hud-briefing-exit,
+  .hud-workspace-boot,
+  .hud-boot-beam {
+    animation: none !important;
+  }
+}
+
+/* Custom Stark HUD Cyan scrollbar */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #0b0f17;
+  background: #020617;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #1e293b;
+  background: rgba(0, 229, 255, 0.28);
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #334155;
+  background: rgba(0, 229, 255, 0.55);
 }

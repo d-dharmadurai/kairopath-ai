@@ -37,11 +37,7 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): P
   }
 }
 
-function isTimeoutError(err: unknown): boolean {
-  return err instanceof Error && err.message.startsWith('TIMEOUT:');
-}
-
-async function withRetry<T>(fn: () => Promise<T>, maxRetries = 2): Promise<T> {
+async function withRetry<T>(fn: () => Promise<T>, maxRetries = 1): Promise<T> {
   let lastErr: unknown;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
@@ -52,37 +48,20 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 2): Promise<T> {
         typeof err === 'object' && err !== null && 'status' in err
           ? Number((err as { status?: unknown }).status)
           : 0;
-      const isTransient = status === 429 || status === 503 || status === 500;
+      const msg = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
+      const isRateOrQuota =
+        status === 429 || msg.includes('429') || msg.includes('resource_exhausted') || msg.includes('quota');
+      if (isRateOrQuota) {
+        throw err;
+      }
+      const isTransient = status === 503 || status === 500;
       if (!isTransient || attempt === maxRetries) {
         throw err;
       }
-      const delayMs = 600 * Math.pow(2, attempt);
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      await new Promise((resolve) => setTimeout(resolve, 400));
     }
   }
   throw lastErr;
-}
-
-function formatGeminiError(err: unknown): { status: number; message: string } {
-  const rawMessage = err instanceof Error ? err.message : String(err);
-  const lower = rawMessage.toLowerCase();
-
-  if (lower.includes('api_key_invalid') || lower.includes('permission_denied') || lower.includes('gemini_api_key')) {
-    return {
-      status: 403,
-      message: 'Gemini API key is missing or invalid. Please verify your key in Settings > Secrets.',
-    };
-  }
-  if (lower.includes('resource_exhausted') || lower.includes('429')) {
-    return {
-      status: 429,
-      message: 'Gemini API rate limit reached. Please wait a moment and try again.',
-    };
-  }
-  return {
-    status: 500,
-    message: rawMessage || 'Unexpected error communicating with Gemini.',
-  };
 }
 
 function parseJsonResponse<T>(text: string | undefined, fallback: T): T {
@@ -122,7 +101,6 @@ app.post('/api/agents/profiler', async (req: Request, res: Response) => {
       return;
     }
 
-    const ai = getAiClient();
     const prompt = `You are the Profiler Agent inside KairoPath.
 Analyze the student's current skills, certifications, and past projects against real-world industry requirements for their target career role.
 
@@ -228,6 +206,7 @@ Instructions:
     };
 
     try {
+      const ai = getAiClient();
       const response = await withTimeout(
         withRetry(() =>
           ai.models.generateContent({
@@ -271,10 +250,8 @@ Instructions:
 
       result = parseJsonResponse(response.text, buildProfilerFallback());
     } catch (innerErr) {
-      if (!isTimeoutError(innerErr)) {
-        throw innerErr;
-      }
-      console.warn('Profiler Agent exceeded 12000ms; returning role-specific fallback analysis.');
+      const reason = innerErr instanceof Error ? innerErr.message : String(innerErr);
+      console.warn(`Profiler Agent fallback activated (${reason}).`);
       result = buildProfilerFallback();
     }
 
@@ -282,8 +259,8 @@ Instructions:
 
     res.json(result);
   } catch (err) {
-    const { status, message } = formatGeminiError(err);
-    res.status(status).json({ error: message });
+    console.error('Profiler Agent unexpected request error:', err);
+    res.status(400).json({ error: 'Invalid profiler request payload.' });
   }
 });
 
@@ -307,7 +284,6 @@ app.post('/api/agents/curriculum', async (req: Request, res: Response) => {
       return;
     }
 
-    const ai = getAiClient();
     const prompt = `You are the Curriculum Architect Agent inside KairoPath.
 Design a sequenced, practical Learning Roadmap for ${studentName} aiming to become a ${role}.
 
@@ -388,6 +364,7 @@ For every module include:
     };
 
     try {
+      const ai = getAiClient();
       const response = await withTimeout(
         withRetry(() =>
           ai.models.generateContent({
@@ -456,10 +433,8 @@ For every module include:
 
       parsed = parseJsonResponse(response.text, buildCurriculumFallback());
     } catch (innerErr) {
-      if (!isTimeoutError(innerErr)) {
-        throw innerErr;
-      }
-      console.warn('Curriculum Architect Agent exceeded 12000ms; returning 5-module fallback roadmap.');
+      const reason = innerErr instanceof Error ? innerErr.message : String(innerErr);
+      console.warn(`Curriculum Architect Agent fallback activated (${reason}).`);
       parsed = buildCurriculumFallback();
     }
 
@@ -477,8 +452,8 @@ For every module include:
 
     res.json({ modules });
   } catch (err) {
-    const { status, message } = formatGeminiError(err);
-    res.status(status).json({ error: message });
+    console.error('Curriculum Agent unexpected request error:', err);
+    res.status(400).json({ error: 'Invalid curriculum request payload.' });
   }
 });
 
@@ -499,7 +474,6 @@ app.post('/api/agents/evaluator', async (req: Request, res: Response) => {
       return;
     }
 
-    const ai = getAiClient();
     const prompt = `You are the Evaluator Agent inside KairoPath.
 Create a crisp 3-question multiple-choice skill assessment specifically for this learning module.
 
@@ -519,6 +493,44 @@ Instructions:
     const primaryTopic = (keyTopics && keyTopics[0]) || skillLabel;
     const secondaryTopic = (keyTopics && keyTopics[1]) || `${skillLabel} architecture`;
 
+    const buildEvaluatorFallback = () => ({
+      questions: [
+        {
+          question: `When applying ${primaryTopic} in "${moduleTitle}", which practice best prevents subtle production bugs?`,
+          options: [
+            'Validate inputs at system boundaries and write isolated unit tests for edge cases',
+            'Disable error handling so failures surface only in production logs',
+            'Hardcode environment credentials directly inside application source files',
+            'Skip modularization and place all business logic inside a single global script',
+          ],
+          correctIndex: 0,
+          explanation: `Validating boundary inputs and testing edge cases ensures ${primaryTopic} behaves reliably under unexpected data.`,
+        },
+        {
+          question: `Which approach is recommended when structuring ${secondaryTopic} for a ${targetRole || 'software'} project?`,
+          options: [
+            'Duplicate logic across components to avoid creating shared abstractions',
+            'Separate core domain logic from external I/O so modules remain testable',
+            'Rely exclusively on manual browser refreshes instead of automated checks',
+            'Store transient state in unindexed flat text files in production',
+          ],
+          correctIndex: 1,
+          explanation: `Separating core logic from I/O keeps ${secondaryTopic} maintainable, modular, and easy to verify.`,
+        },
+        {
+          question: `What is the primary indicator that a feature built with ${skillLabel} is ready to ship?`,
+          options: [
+            'It compiles once locally without checking error states',
+            'It passes automated verification, handles failure modes gracefully, and meets performance expectations',
+            'All configuration values are hardcoded for a single developer laptop',
+            'Documentation and tests are omitted to keep the repository smaller',
+          ],
+          correctIndex: 1,
+          explanation: `Production readiness in ${skillLabel} requires automated verification, graceful error handling, and repeatable configuration.`,
+        },
+      ],
+    });
+
     let parsed: {
       questions: Array<{
         question: string;
@@ -529,6 +541,7 @@ Instructions:
     };
 
     try {
+      const ai = getAiClient();
       const response = await withTimeout(
         withRetry(() =>
           ai.models.generateContent({
@@ -568,49 +581,14 @@ Instructions:
         'evaluator'
       );
 
-      parsed = parseJsonResponse(response.text, { questions: [] });
-    } catch (innerErr) {
-      if (!isTimeoutError(innerErr)) {
-        throw innerErr;
+      parsed = parseJsonResponse(response.text, buildEvaluatorFallback());
+      if (!Array.isArray(parsed.questions) || parsed.questions.length === 0) {
+        parsed = buildEvaluatorFallback();
       }
-      console.warn(`Evaluator Agent exceeded ${AGENT_TIMEOUT_MS}ms; using timeout fallback quiz.`);
-      parsed = {
-        questions: [
-          {
-            question: `When applying ${primaryTopic} in "${moduleTitle}", which practice best prevents subtle production bugs?`,
-            options: [
-              'Validate inputs at system boundaries and write isolated unit tests for edge cases',
-              'Disable error handling so failures surface only in production logs',
-              'Hardcode environment credentials directly inside application source files',
-              'Skip modularization and place all business logic inside a single global script',
-            ],
-            correctIndex: 0,
-            explanation: `Validating boundary inputs and testing edge cases ensures ${primaryTopic} behaves reliably under unexpected data.`,
-          },
-          {
-            question: `Which approach is recommended when structuring ${secondaryTopic} for a ${targetRole || 'software'} project?`,
-            options: [
-              'Duplicate logic across components to avoid creating shared abstractions',
-              'Separate core domain logic from external I/O so modules remain testable',
-              'Rely exclusively on manual browser refreshes instead of automated checks',
-              'Store transient state in unindexed flat text files in production',
-            ],
-            correctIndex: 1,
-            explanation: `Separating core logic from I/O keeps ${secondaryTopic} maintainable, modular, and easy to verify.`,
-          },
-          {
-            question: `What is the primary indicator that a feature built with ${skillLabel} is ready to ship?`,
-            options: [
-              'It compiles once locally without checking error states',
-              'It passes automated verification, handles failure modes gracefully, and meets performance expectations',
-              'All configuration values are hardcoded for a single developer laptop',
-              'Documentation and tests are omitted to keep the repository smaller',
-            ],
-            correctIndex: 1,
-            explanation: `Production readiness in ${skillLabel} requires automated verification, graceful error handling, and repeatable configuration.`,
-          },
-        ],
-      };
+    } catch (innerErr) {
+      const reason = innerErr instanceof Error ? innerErr.message : String(innerErr);
+      console.warn(`Evaluator Agent fallback activated (${reason}).`);
+      parsed = buildEvaluatorFallback();
     }
 
     const questions = (parsed.questions || []).slice(0, 3).map((q, idx) => ({
@@ -627,8 +605,8 @@ Instructions:
       questions,
     });
   } catch (err) {
-    const { status, message } = formatGeminiError(err);
-    res.status(status).json({ error: message });
+    console.error('Evaluator Agent unexpected request error:', err);
+    res.status(400).json({ error: 'Invalid evaluator request payload.' });
   }
 });
 
@@ -679,8 +657,6 @@ app.post('/api/agents/mentor', async (req: Request, res: Response) => {
     const scorePercent = Math.round((correctCount / totalCount) * 100);
     const passed = scorePercent >= 70;
 
-    const ai = getAiClient();
-
     if (passed) {
       const prompt = `You are the Mentor Agent inside KairoPath.
 ${studentName} passed the skill quiz for module "${module.title}" (Target Role: ${targetRole || 'Developer'}) with ${correctCount}/${totalCount} (${scorePercent}%).
@@ -692,6 +668,7 @@ Write a concise, encouraging 2-sentence "feedbackSummary" acknowledging their ma
       let parsed = { feedbackSummary: defaultPassFeedback };
 
       try {
+        const ai = getAiClient();
         const response = await withTimeout(
           withRetry(() =>
             ai.models.generateContent({
@@ -719,10 +696,8 @@ Write a concise, encouraging 2-sentence "feedbackSummary" acknowledging their ma
           feedbackSummary: defaultPassFeedback,
         });
       } catch (innerErr) {
-        if (!isTimeoutError(innerErr)) {
-          throw innerErr;
-        }
-        console.warn(`Mentor Agent (pass) exceeded ${AGENT_TIMEOUT_MS}ms; using timeout fallback.`);
+        const reason = innerErr instanceof Error ? innerErr.message : String(innerErr);
+        console.warn(`Mentor Agent (pass) fallback activated (${reason}).`);
       }
 
       res.json({
@@ -796,6 +771,7 @@ Instructions:
     } = fallbackRemediation;
 
     try {
+      const ai = getAiClient();
       const response = await withTimeout(
         withRetry(() =>
           ai.models.generateContent({
@@ -863,10 +839,9 @@ Instructions:
 
       parsed = parseJsonResponse(response.text, fallbackRemediation);
     } catch (innerErr) {
-      if (!isTimeoutError(innerErr)) {
-        throw innerErr;
-      }
-      console.warn(`Mentor Agent (remediation) exceeded ${AGENT_TIMEOUT_MS}ms; using timeout fallback.`);
+      const reason = innerErr instanceof Error ? innerErr.message : String(innerErr);
+      console.warn(`Mentor Agent (remediation) fallback activated (${reason}).`);
+      parsed = fallbackRemediation;
     }
 
     if (parsed.refresherModule && !parsed.refresherModule.title.startsWith('Foundational Refresher:')) {
@@ -883,8 +858,603 @@ Instructions:
       refresherModule: parsed.refresherModule,
     });
   } catch (err) {
-    const { status, message } = formatGeminiError(err);
-    res.status(status).json({ error: message });
+    console.error('Mentor Agent unexpected request error:', err);
+    res.status(400).json({ error: 'Invalid mentor grading payload.' });
+  }
+});
+
+// Smart Resume / Bio Auto-Fill — Profiler Agent extracts structured student profile from raw text
+app.post('/api/agents/parse-profile', async (req: Request, res: Response) => {
+  try {
+    const { rawText } = req.body as { rawText?: string };
+    const text = (rawText || '').trim();
+
+    if (!text) {
+      res.status(400).json({ error: 'Please paste a resume summary or bio first.' });
+      return;
+    }
+
+    const buildBioFallback = () => {
+      const nameMatch =
+        text.match(/(?:I'm|I am|Name[:\s]+)\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/i) ||
+        text.match(/^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+[-–—]/);
+      const extractedName = nameMatch ? nameMatch[1].trim() : 'Alex';
+
+      const knownSkills = [
+        'Python',
+        'SQL',
+        'PostgreSQL',
+        'MySQL',
+        'HTML',
+        'CSS',
+        'JavaScript',
+        'TypeScript',
+        'React',
+        'Node.js',
+        'Express',
+        'Flask',
+        'Django',
+        'FastAPI',
+        'Docker',
+        'Kubernetes',
+        'Terraform',
+        'AWS',
+        'Git',
+        'GitHub Actions',
+        'PyTorch',
+        'TensorFlow',
+        'Spark',
+        'Airflow',
+        'Linux',
+      ];
+      const lower = text.toLowerCase();
+      const skills = knownSkills.filter((sk) => lower.includes(sk.toLowerCase()));
+
+      const certMatches = text.match(
+        /(AWS\s+[A-Za-z\s]+?(?:Practitioner|Associate|Professional)|HashiCorp\s+[A-Za-z\s]+?Associate|Google\s+Cloud\s+[A-Za-z\s]+|Azure\s+[A-Za-z\s]+|CKA|CKAD)/gi
+      );
+      const certifications = certMatches
+        ? Array.from(new Set(certMatches.map((c) => c.trim())))
+        : [];
+
+      const projectMatches = text.match(
+        /(?:projects?\s*(?:include|:)?\s*|built\s+(?:a|an)?\s*)([^.!?\n]+)/gi
+      );
+      const pastProjects = projectMatches
+        ? projectMatches
+            .slice(0, 3)
+            .map((p) =>
+              p
+                .replace(/^(?:projects?\s*(?:include|:)?\s*|built\s+(?:a|an)?\s*)/i, '')
+                .trim()
+            )
+            .filter((p) => p.length > 3)
+        : [];
+
+      let targetRole = 'Full Stack Developer';
+      if (lower.includes('devops') || lower.includes('sre')) {
+        targetRole = 'Cloud DevOps Engineer';
+      } else if (lower.includes('data engineer')) {
+        targetRole = 'Data Engineer';
+      } else if (lower.includes('ml engineer') || lower.includes('ai engineer') || lower.includes('machine learning')) {
+        targetRole = 'AI/ML Engineer';
+      } else if (lower.includes('full stack') || lower.includes('fullstack')) {
+        targetRole = 'Full Stack Developer';
+      }
+
+      return {
+        name: extractedName,
+        currentSkills: skills.length > 0 ? skills : ['Python', 'SQL'],
+        certifications,
+        pastProjects,
+        targetRole,
+      };
+    };
+
+    const prompt = `You are the Profiler Agent inside KairoPath.
+Extract a structured student career profile from the following raw resume or bio text.
+
+Raw Text:
+"""
+${text.slice(0, 4000)}
+"""
+
+Instructions:
+- "name": Student's first or full name (or "Student" if unnamed).
+- "currentSkills": Array of technical skills, languages, frameworks, and tools mentioned.
+- "certifications": Array of professional or cloud certifications mentioned (empty array if none).
+- "pastProjects": Array of concise project names/descriptions mentioned (empty array if none).
+- "targetRole": The target career role they are aiming for (infer the closest engineering role if implicit).`;
+
+    let parsed: {
+      name: string;
+      currentSkills: string[];
+      certifications: string[];
+      pastProjects: string[];
+      targetRole: string;
+    };
+
+    try {
+      const ai = getAiClient();
+      const response = await withTimeout(
+        withRetry(() =>
+          ai.models.generateContent({
+            model: MODEL_ID,
+            contents: prompt,
+            config: {
+              thinkingConfig: { thinkingBudget: 0 },
+              systemInstruction:
+                'You are a precise resume parser. Extract structured student profile fields strictly in JSON.',
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  name: { type: Type.STRING },
+                  currentSkills: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                  },
+                  certifications: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                  },
+                  pastProjects: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                  },
+                  targetRole: { type: Type.STRING },
+                },
+                required: [
+                  'name',
+                  'currentSkills',
+                  'certifications',
+                  'pastProjects',
+                  'targetRole',
+                ],
+              },
+            },
+          })
+        ),
+        12000,
+        'parse-profile'
+      );
+
+      parsed = parseJsonResponse(response.text, buildBioFallback());
+    } catch (innerErr) {
+      const reason = innerErr instanceof Error ? innerErr.message : String(innerErr);
+      console.warn(`Profiler bio parser fallback activated (${reason}).`);
+      parsed = buildBioFallback();
+    }
+
+    res.json({
+      name: (parsed.name || 'Student').trim(),
+      currentSkills: Array.isArray(parsed.currentSkills) ? parsed.currentSkills : [],
+      certifications: Array.isArray(parsed.certifications) ? parsed.certifications : [],
+      pastProjects: Array.isArray(parsed.pastProjects) ? parsed.pastProjects : [],
+      targetRole: (parsed.targetRole || 'Full Stack Developer').trim(),
+    });
+  } catch (err) {
+    console.error('Bio parser unexpected request error:', err);
+    res.status(400).json({ error: 'Invalid bio parser request payload.' });
+  }
+});
+
+// Live "Ask Kairo Mentor" Floating Chat — answers coaching questions and can dynamically refine/compress the roadmap
+app.post('/api/agents/mentor-chat', async (req: Request, res: Response) => {
+  try {
+    const {
+      message,
+      studentProfile,
+      profilerResult,
+      modules,
+      lastFailedAlert,
+      chatHistory,
+    } = req.body as {
+      message?: string;
+      studentProfile?: {
+        name?: string;
+        currentSkills?: string[];
+        certifications?: string[];
+        pastProjects?: string[];
+        targetRole?: string;
+      };
+      profilerResult?: {
+        verifiedSkills?: string[];
+        missingSkills?: string[];
+        careerMatchPercent?: number;
+      } | null;
+      modules?: Array<{
+        id: string;
+        title: string;
+        targetSkill: string;
+        estimatedHours: number;
+        keyTopics: string[];
+        recommendedCourses?: Array<{ title: string; platform: string; format: string }>;
+        miniProject: { title: string; description: string };
+        completed?: boolean;
+        quizScore?: number;
+        isRefresher?: boolean;
+      }>;
+      lastFailedAlert?: {
+        failedModuleTitle?: string;
+        scorePercent?: number;
+        struggleReason?: string;
+      } | null;
+      chatHistory?: Array<{ role: string; content: string }>;
+    };
+
+    const userMsg = (message || '').trim();
+    if (!userMsg) {
+      res.status(400).json({ error: 'Chat message is required.' });
+      return;
+    }
+
+    const studentName = (studentProfile?.name || 'Student').trim();
+    const role = (studentProfile?.targetRole || 'Full Stack Developer').trim();
+    const missingSkills = profilerResult?.missingSkills || [];
+    const verifiedSkills = profilerResult?.verifiedSkills || studentProfile?.currentSkills || [];
+    const currentModules = Array.isArray(modules) ? modules : [];
+
+    const buildChatFallback = () => {
+      const lower = userMsg.toLowerCase();
+      const wantsAdjustment =
+        currentModules.length > 0 &&
+        (lower.includes('compress') ||
+          lower.includes('2-week') ||
+          lower.includes('two-week') ||
+          lower.includes('interview') ||
+          lower.includes('shorten') ||
+          lower.includes('adjust') ||
+          lower.includes('refine') ||
+          lower.includes('prioritize') ||
+          lower.includes('update roadmap'));
+
+      if (wantsAdjustment) {
+        const compressed = currentModules.slice(0, 4).map((m, idx) => ({
+          ...m,
+          id: m.id || `mod-sprint-${Date.now()}-${idx + 1}`,
+          title: m.title.startsWith('Sprint Focus:') ? m.title : `Sprint Focus: ${m.title}`,
+          estimatedHours: Math.max(2, Math.min(6, Math.round(m.estimatedHours * 0.55))),
+          keyTopics: (m.keyTopics || []).slice(0, 3),
+          recommendedCourses: m.recommendedCourses || [],
+          miniProject: m.miniProject,
+          completed: Boolean(m.completed),
+        }));
+        const totalHrs = compressed.reduce((s, m) => s + m.estimatedHours, 0);
+        return {
+          reply: `I compressed your ${role} roadmap into a high-impact ${compressed.length}-module, ${totalHrs}-hour 2-week interview sprint. Focus on passing each module's skill quiz in sequence to lock in readiness before interviews.`,
+          shouldUpdateRoadmap: true,
+          updatedModules: compressed,
+        };
+      }
+
+      if (lower.includes('fail') || lower.includes('quiz') || lower.includes('struggle')) {
+        if (lastFailedAlert?.failedModuleTitle) {
+          return {
+            reply: `On "${lastFailedAlert.failedModuleTitle}" (${lastFailedAlert.scorePercent}%), ${lastFailedAlert.struggleReason} Review the Foundational Refresher inserted right before that module and retake the quiz when ready.`,
+            shouldUpdateRoadmap: false,
+          };
+        }
+        return {
+          reply: `You haven't failed a quiz yet! Whenever a module quiz scores below 70%, I diagnose the exact missed concepts and insert a Foundational Refresher right before that step.`,
+          shouldUpdateRoadmap: false,
+        };
+      }
+
+      if (lower.includes('capstone') || lower.includes('project')) {
+        const gaps = missingSkills.slice(0, 3).join(', ') || 'API architecture, state management, and testing';
+        const base = verifiedSkills.slice(0, 2).join(' + ') || 'your core stack';
+        return {
+          reply: `Build a production-grade "${role} Capstone Studio" combining ${base} with your target gaps (${gaps}). Include automated tests, clean error handling, and a live deployment checklist to showcase end-to-end ownership.`,
+          shouldUpdateRoadmap: false,
+        };
+      }
+
+      return {
+        reply: `Focus next on ${currentModules.find((m) => !m.completed)?.title || missingSkills[0] || role}. If you have an upcoming deadline, ask me to compress your roadmap into a 2-week sprint and I'll rebalance the modules live.`,
+        shouldUpdateRoadmap: false,
+      };
+    };
+
+    const recentHistory = (chatHistory || [])
+      .slice(-6)
+      .map((h) => `${h.role === 'user' ? 'Student' : 'Mentor'}: ${h.content}`)
+      .join('\n');
+
+    const prompt = `You are Kairo Mentor, an expert adaptive career coach inside KairoPath.
+
+Student Context:
+- Name: ${studentName}
+- Target Role: ${role}
+- Verified Skills: ${verifiedSkills.join(', ') || 'None yet'}
+- Missing Skills: ${missingSkills.join(', ') || 'None analyzed yet'}
+- Career Match: ${profilerResult?.careerMatchPercent ?? 'N/A'}%
+- Last Failed Quiz Alert: ${
+      lastFailedAlert
+        ? `${lastFailedAlert.failedModuleTitle} (${lastFailedAlert.scorePercent}%) — ${lastFailedAlert.struggleReason}`
+        : 'None'
+    }
+- Current Roadmap Modules (${currentModules.length}):
+${currentModules
+  .map(
+    (m, i) =>
+      `  ${i + 1}. [${m.completed ? 'DONE' : 'TODO'}] ${m.title} (Skill: ${m.targetSkill}, ${m.estimatedHours}h)`
+  )
+  .join('\n') || '  (No roadmap generated yet)'}
+
+Recent Chat:
+${recentHistory || '(Start of conversation)'}
+
+Student Question: "${userMsg}"
+
+Instructions:
+1. Give a sharp, practical, personalized coaching "reply" (2–4 sentences max).
+2. Set "shouldUpdateRoadmap": true ONLY if the student asks to compress, shorten, reorder, prioritize, tailor, or adjust their existing roadmap (and there are current modules to adjust). Otherwise set "shouldUpdateRoadmap": false.
+3. When "shouldUpdateRoadmap" is true, populate "updatedModules" with the refined array of modules (3–5 high-impact modules with realistic compressed "estimatedHours", clear "title", "targetSkill", "keyTopics", "recommendedCourses", and "miniProject", preserving "completed" where appropriate). When false, omit or return an empty array for "updatedModules".`;
+
+    let parsed: {
+      reply: string;
+      shouldUpdateRoadmap: boolean;
+      updatedModules?: Array<{
+        title: string;
+        targetSkill: string;
+        estimatedHours: number;
+        keyTopics: string[];
+        recommendedCourses?: Array<{ title: string; platform: string; format: string }>;
+        miniProject: { title: string; description: string };
+        completed?: boolean;
+        isRefresher?: boolean;
+      }>;
+    };
+
+    try {
+      const ai = getAiClient();
+      const response = await withTimeout(
+        withRetry(() =>
+          ai.models.generateContent({
+            model: MODEL_ID,
+            contents: prompt,
+            config: {
+              thinkingConfig: { thinkingBudget: 0 },
+              systemInstruction:
+                'You are Kairo Mentor, an adaptive AI career coach. Reply in strict JSON and dynamically update roadmap modules when asked to compress or adjust the plan.',
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  reply: { type: Type.STRING },
+                  shouldUpdateRoadmap: { type: Type.BOOLEAN },
+                  updatedModules: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        title: { type: Type.STRING },
+                        targetSkill: { type: Type.STRING },
+                        estimatedHours: { type: Type.INTEGER },
+                        keyTopics: {
+                          type: Type.ARRAY,
+                          items: { type: Type.STRING },
+                        },
+                        recommendedCourses: {
+                          type: Type.ARRAY,
+                          items: {
+                            type: Type.OBJECT,
+                            properties: {
+                              title: { type: Type.STRING },
+                              platform: { type: Type.STRING },
+                              format: { type: Type.STRING },
+                            },
+                            required: ['title', 'platform', 'format'],
+                          },
+                        },
+                        miniProject: {
+                          type: Type.OBJECT,
+                          properties: {
+                            title: { type: Type.STRING },
+                            description: { type: Type.STRING },
+                          },
+                          required: ['title', 'description'],
+                        },
+                        completed: { type: Type.BOOLEAN },
+                        isRefresher: { type: Type.BOOLEAN },
+                      },
+                      required: [
+                        'title',
+                        'targetSkill',
+                        'estimatedHours',
+                        'keyTopics',
+                        'recommendedCourses',
+                        'miniProject',
+                      ],
+                    },
+                  },
+                },
+                required: ['reply', 'shouldUpdateRoadmap'],
+              },
+            },
+          })
+        ),
+        12000,
+        'mentor-chat'
+      );
+
+      parsed = parseJsonResponse(response.text, buildChatFallback());
+    } catch (innerErr) {
+      const reason = innerErr instanceof Error ? innerErr.message : String(innerErr);
+      console.warn(`Mentor Chat fallback activated (${reason}).`);
+      parsed = buildChatFallback();
+    }
+
+    const shouldUpdate =
+      Boolean(parsed.shouldUpdateRoadmap) &&
+      Array.isArray(parsed.updatedModules) &&
+      parsed.updatedModules.length > 0;
+
+    const normalizedModules = shouldUpdate
+      ? parsed.updatedModules!.map((mod, idx) => ({
+          id: `mod-mentor-${Date.now()}-${idx + 1}`,
+          title: mod.title,
+          targetSkill: mod.targetSkill,
+          estimatedHours: Math.max(1, Math.round(Number(mod.estimatedHours) || 4)),
+          keyTopics: Array.isArray(mod.keyTopics) ? mod.keyTopics : [],
+          recommendedCourses: Array.isArray(mod.recommendedCourses) ? mod.recommendedCourses : [],
+          miniProject: mod.miniProject || {
+            title: 'Focused Sprint Exercise',
+            description: 'Build a concise deliverable demonstrating this skill.',
+          },
+          completed: Boolean(mod.completed),
+          isRefresher: Boolean(mod.isRefresher),
+        }))
+      : undefined;
+
+    res.json({
+      reply: parsed.reply,
+      shouldUpdateRoadmap: shouldUpdate,
+      updatedModules: normalizedModules,
+    });
+  } catch (err) {
+    console.error('Mentor Chat unexpected request error:', err);
+    res.status(400).json({ error: 'Invalid mentor chat payload.' });
+  }
+});
+
+// Mini-Project / Code Check Sandbox — Evaluator & Mentor Agents review code/architecture solution (HTTP 200 fallback)
+app.post('/api/agents/review-project', async (req: Request, res: Response) => {
+  try {
+    const { name, targetRole, module, submission } = req.body as {
+      name?: string;
+      targetRole?: string;
+      module?: {
+        id?: string;
+        title?: string;
+        targetSkill?: string;
+        miniProject?: { title?: string; description?: string };
+      };
+      submission?: string;
+    };
+
+    const codeText = (submission || '').trim();
+    if (!codeText || !module?.title) {
+      res.status(400).json({ error: 'Module details and solution submission are required.' });
+      return;
+    }
+
+    const studentName = (name || 'Student').trim();
+    const role = (targetRole || 'Software Engineer').trim();
+    const skill = module.targetSkill || module.title;
+    const projectTitle = module.miniProject?.title || module.title;
+
+    const buildReviewFallback = () => {
+      const lower = codeText.toLowerCase();
+      const signals = ['async', 'await', 'try', 'catch', 'test', 'schema', 'validate', 'error', 'index', 'return', 'const', 'function', 'class', 'select', 'docker', 'api'];
+      const matchedSignals = signals.filter((kw) => lower.includes(kw)).length;
+      const isBrief = codeText.length < 45;
+      const scorePercent = isBrief
+        ? Math.min(65, 42 + Math.round(codeText.length / 2))
+        : Math.min(94, 76 + Math.min(18, matchedSignals * 3));
+      const verified = scorePercent >= 70;
+
+      return {
+        scorePercent,
+        verified,
+        summary: verified
+          ? `${studentName}'s solution for "${projectTitle}" demonstrates solid ${skill} structure and production-minded separation of concerns for a ${role}.`
+          : `Good start on "${projectTitle}", ${studentName}, but the submission is too brief to verify ${skill} edge-case handling and testability.`,
+        strengths: verified
+          ? [
+              `Clear implementation structure aligned with ${skill} best practices.`,
+              `Addresses core functional requirements for "${projectTitle}" cleanly.`,
+            ]
+          : [
+              `Captures the core intent of "${projectTitle}".`,
+              `Concise entry point that is easy to expand with validation.`,
+            ],
+        improvementTip: verified
+          ? `Add explicit boundary error handling and an automated unit or integration test covering failure states in ${skill}.`
+          : `Expand your snippet with input validation, error handling (try/catch), and at least one concrete test case to reach Portfolio Verified (>=70%).`,
+      };
+    };
+
+    let parsed = buildReviewFallback();
+
+    try {
+      const ai = getAiClient();
+      const prompt = `You are collaborating as the Evaluator & Mentor Agents inside KairoPath.
+Review ${studentName}'s Mini-Project / Code Check submission for the target role "${role}".
+
+Module: ${module.title}
+Target Skill: ${skill}
+Practical Exercise: ${projectTitle} — ${module.miniProject?.description || ''}
+
+Student Submission:
+"""
+${codeText.slice(0, 4000)}
+"""
+
+Instructions:
+1. "scorePercent": Integer 0–100 grading correctness, clarity, and production readiness for ${skill}. Award >= 70 for solid code or clear architecture explanations; < 70 only if incomplete, incorrect, or trivial.
+2. "summary": Crisp 1–2 sentence overall verdict addressing ${studentName}.
+3. "strengths": Exactly 2 concise bullet strings highlighting what the submission did well.
+4. "improvementTip": 1 specific, actionable next improvement tip.`;
+
+      const response = await withTimeout(
+        withRetry(() =>
+          ai.models.generateContent({
+            model: MODEL_ID,
+            contents: prompt,
+            config: {
+              thinkingConfig: { thinkingBudget: 0 },
+              systemInstruction:
+                'You are a constructive senior code reviewer & mentor. Return strictly valid JSON matching the schema.',
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  scorePercent: { type: Type.INTEGER },
+                  summary: { type: Type.STRING },
+                  strengths: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                  },
+                  improvementTip: { type: Type.STRING },
+                },
+                required: ['scorePercent', 'summary', 'strengths', 'improvementTip'],
+              },
+            },
+          })
+        ),
+        12000,
+        'review-project'
+      );
+
+      const aiParsed = parseJsonResponse<{
+        scorePercent: number;
+        summary: string;
+        strengths: string[];
+        improvementTip: string;
+      }>(response.text, parsed);
+
+      const scorePercent = Math.max(0, Math.min(100, Math.round(Number(aiParsed.scorePercent) || parsed.scorePercent)));
+      parsed = {
+        scorePercent,
+        verified: scorePercent >= 70,
+        summary: aiParsed.summary || parsed.summary,
+        strengths: Array.isArray(aiParsed.strengths) && aiParsed.strengths.length > 0
+          ? aiParsed.strengths.slice(0, 2)
+          : parsed.strengths,
+        improvementTip: aiParsed.improvementTip || parsed.improvementTip,
+      };
+    } catch (innerErr) {
+      const reason = innerErr instanceof Error ? innerErr.message : String(innerErr);
+      console.warn(`Project Review Agent fallback activated (${reason}).`);
+      parsed = buildReviewFallback();
+    }
+
+    res.json(parsed);
+  } catch (err) {
+    console.error('Project Review unexpected request error:', err);
+    res.status(400).json({ error: 'Invalid project review payload.' });
   }
 });
 
